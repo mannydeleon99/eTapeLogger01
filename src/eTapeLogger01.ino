@@ -11,7 +11,7 @@ SYSTEM_THREAD(ENABLED);
 SerialLogHandler logHandler;
 
 // Sleep time between cycles (measurement period)
-const std::chrono::minutes publishPeriod = 1min;
+const std::chrono::minutes publishPeriod = 5min;  // not sure why this was orginally 1min. Will cause battery issues  
 
 // Time to turn sleep OFF off before taking a measurement
 const std::chrono::seconds sensorWarmup = 10s;
@@ -25,7 +25,18 @@ const char *eventName = "eTape Log 1";
 const pin_t ETAPE_PIN = A0;     // eTape on A0
 const float VREF      = 3.3f;   // Boron ADC full-scale
 const int   NUMSAMPLES = 20;    // Amount of samples taken for smoothing
-const int   batchSize = 3;      // Amount of readings in a batch
+
+
+const int   batchSize = 6;      // Amount of readings in a batch  (6 * 5min = 30 mins), will publish ever 30 min 
+const int   maxBufferSize = 18; // Maximum offline storage capacity (18 * 5min = 1.5 hours)
+
+// Particle variable (open you particle app)
+double v_depth = 0.0;
+double v_sensorV = 0.0;
+double v_battSoc = 0.0;
+double v_battV = 0.0;
+int v_cellSig = 0;
+
 
 //Declaration of variables
 FuelGauge fuel;
@@ -60,7 +71,14 @@ void setup() {
     waitFor(Serial.isConnected, 3000);
     Log.info("Starting eTape logger");
     battSettings();
-    
+
+// Register variables to the Particle Cloud (Max 12 chars per name)
+    Particle.variable("Depth", v_depth);
+    Particle.variable("SensorVolts", v_sensorV);
+    Particle.variable("BattSoC", v_battSoc);
+    Particle.variable("BattVolts", v_battV);
+    Particle.variable("CellSignal", v_cellSig);
+    Particle.variable("QCount", readingCount); // Exposing the retained count
 }
 
 void loop() {
@@ -117,11 +135,19 @@ void takeMeasurement() {
     currentReading.cellStrength = sig.getStrength();
 
     currentReading.timestamp = Time.now();
+
+    // Particle varibles
+    v_depth = (double)currentReading.depth;
+    v_sensorV = (double)currentReading.volts;
+    v_battSoc = (double)currentReading.batterySoc;
+    v_battV = (double)currentReading.batteryVolts;
+    v_cellSig = currentReading.cellStrength;
+    
 }
 
 void storeReading() {
 
-    if (readingCount < batchSize) {
+    if (readingCount < maxBufferSize) {
         readings[readingCount] = currentReading;
         readingCount++;
 
@@ -138,7 +164,7 @@ void publishBatch() {
 
     if (Particle.connected()) {
         
-        char payload[512];
+        char payload[1024];   // Increased payload size to handle up to 18 readings safely
         payload[0] = '\0';
 
         strcat(payload, "[");
@@ -167,8 +193,12 @@ void publishBatch() {
 
         Particle.publish(eventName, payload, PRIVATE);
 
-        readingCount = 0;
-
+        // Only clear the retained array if the publish actually succeeds
+        bool success = Particle.publish(eventName, payload, PRIVATE);
+        
+    if(success){
+         readingCount = 0;
+      }
     }
 }
 
@@ -189,7 +219,7 @@ void battSettings() {
   conf.powerSourceMaxCurrent(900)    // 5W / 5V = 1000mA. 900mA is the closest PMIC register setting.
       .powerSourceMinVoltage(3880)  
       .batteryChargeCurrent(500)
-      .batteryChargeVoltage(4110);  
+      .batteryChargeVoltage(4110);    // you can increase to 4208 which is the max, for 4.2v 
       
   System.setPowerConfiguration(conf);
 }
